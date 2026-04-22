@@ -1,0 +1,141 @@
+import java.security.MessageDigest
+
+group = "com.huyphan.flutter_paddle_ocr"
+version = "1.0-SNAPSHOT"
+
+buildscript {
+    ext.kotlin_version = "2.2.20"
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath("com.android.tools.build:gradle:8.11.1")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version")
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "kotlin-android"
+
+// Paddle Lite version is parameterized so future upgrades are a one-line change.
+// Override from example/android/gradle.properties or `-PpaddleLiteVersion=...` on the command line.
+def paddleLiteVersion = (project.findProperty('paddleLiteVersion') ?: 'v2_10').toString()
+def openCvUrl = (project.findProperty('openCvUrl') ?: 'https://paddlelite-demo.bj.bcebos.com/libs/android/opencv-4.2.0-android-sdk.tar.gz').toString()
+
+android {
+    namespace = "com.huyphan.flutter_paddle_ocr"
+
+    compileSdk = 36
+    // Paddle Lite v2.10's prebuilt libpaddle_light_api_shared.so was linked against
+    // an older ld. NDK 27+'s ld.lld errors on its _edata/_end/__bss_start symbols.
+    // r25c is the last NDK that links cleanly against it.
+    ndkVersion = "25.2.9519653"
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main.java.srcDirs += "src/main/kotlin"
+        test.java.srcDirs += "src/test/kotlin"
+    }
+
+    defaultConfig {
+        minSdk = 24
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++11 -frtti -fexceptions -Wno-format"
+                arguments '-DANDROID_PLATFORM=android-24', '-DANDROID_STL=c++_shared', '-DANDROID_ARM_NEON=TRUE'
+            }
+        }
+        ndk {
+            // Paddle Lite v2.10's prebuilt archive only ships arm64-v8a (no armeabi-v7a).
+            // Google Play has required 64-bit since 2019, so this covers supported devices.
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    dependencies {
+        testImplementation("org.jetbrains.kotlin:kotlin-test")
+        testImplementation("org.mockito:mockito-core:5.0.0")
+    }
+
+    testOptions {
+        unitTests.all {
+            useJUnitPlatform()
+
+            testLogging {
+               events "passed", "skipped", "failed", "standardOut", "standardError"
+               outputs.upToDateWhen {false}
+               showStandardStreams = true
+            }
+        }
+    }
+}
+
+// ---- Native archive download ----
+// Mirrors the PaddleOCR android_demo pattern: fetches Paddle Lite + OpenCV tarballs once,
+// caches by MD5, and extracts into the plugin's android/ directory so CMake can find them.
+def archives = [
+        [
+                'src' : "https://paddleocr.bj.bcebos.com/libs/paddle_lite_libs_${paddleLiteVersion}.tar.gz",
+                'dest': 'PaddleLite'
+        ],
+        [
+                'src' : openCvUrl,
+                'dest': 'OpenCV'
+        ]
+]
+
+task downloadAndExtractArchives(type: DefaultTask) {
+    doFirst {
+        println "Downloading Paddle Lite (${paddleLiteVersion}) + OpenCV native archives"
+    }
+    doLast {
+        String cachePath = "${project.projectDir}/cache"
+        if (!file(cachePath).exists()) {
+            mkdir cachePath
+        }
+        archives.each { archive ->
+            MessageDigest messageDigest = MessageDigest.getInstance('MD5')
+            messageDigest.update(archive.src.bytes)
+            String cacheName = new BigInteger(1, messageDigest.digest()).toString(32)
+            File archiveFile = file("${cachePath}/${cacheName}.tar.gz")
+            File destDir = file("${project.projectDir}/${archive.dest}")
+            boolean needsExtract = !destDir.exists()
+            if (!archiveFile.exists()) {
+                println "Downloading ${archive.src}"
+                ant.get(src: archive.src, dest: archiveFile)
+                needsExtract = true
+            }
+            if (needsExtract) {
+                copy {
+                    from tarTree(archiveFile)
+                    into destDir
+                }
+            }
+        }
+    }
+}
+preBuild.dependsOn downloadAndExtractArchives
